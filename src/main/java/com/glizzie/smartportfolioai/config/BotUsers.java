@@ -21,9 +21,13 @@ public class BotUsers {
 
     private String languageCode;
 
+    private String state = "DEFAULT";
+
+
     public BotUsers(Long chatId, String languageCode) {
         this.chatId = chatId;
         this.languageCode = languageCode;
+        this.state = "DEFAULT";
     }
 
 }

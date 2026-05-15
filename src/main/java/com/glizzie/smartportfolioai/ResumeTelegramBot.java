@@ -2,8 +2,12 @@ package com.glizzie.smartportfolioai;
 
 import com.glizzie.smartportfolioai.commands.CommandHandler;
 import com.glizzie.smartportfolioai.config.BotConfig;
+import com.glizzie.smartportfolioai.config.Feedback;
+import com.glizzie.smartportfolioai.repository.FeedbackRepository;
 import com.glizzie.smartportfolioai.service.ResumeService;
 import com.glizzie.smartportfolioai.service.UserService;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.client.okhttp.OkHttpTelegramClient;
 import org.telegram.telegrambots.longpolling.interfaces.LongPollingUpdateConsumer;
@@ -15,6 +19,7 @@ import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
 import org.telegram.telegrambots.meta.api.objects.InputFile;
 import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.message.Message;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
@@ -26,6 +31,8 @@ import org.telegram.telegrambots.meta.generics.TelegramClient;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -38,14 +45,23 @@ public class ResumeTelegramBot implements SpringLongPollingBot, LongPollingSingl
     private final BotConfig config;
     private final ResumeService resumeService;
     private final UserService userService;
+    private final ChatClient chatClient;
+    private final FeedbackRepository feedbackRepository;
+
+    @Value(value = "${bot.my_chat}")
+    private long myChatId;
 
     public ResumeTelegramBot(BotConfig config,
                              UserService userService,
+                             FeedbackRepository feedbackRepository,
                              ResumeService resumeService,
-                             List<CommandHandler> commandList) {
+                             List<CommandHandler> commandList,
+                             ChatClient.Builder chatClientBuilder) {
         this.config = config;
         this.userService = userService;
+        this.feedbackRepository = feedbackRepository;
         this.resumeService = resumeService;
+        this.chatClient = chatClientBuilder.build();
         this.telegramClient = new OkHttpTelegramClient(getBotToken());
         this.commands = commandList.stream()
                 .collect(Collectors.toMap(CommandHandler::getCommandName, handler -> handler));
@@ -74,31 +90,43 @@ public class ResumeTelegramBot implements SpringLongPollingBot, LongPollingSingl
     private void handleCallback(CallbackQuery callbackQuery) {
         long chatId = callbackQuery.getMessage().getChatId();
         String data = callbackQuery.getData();
+        // Получаем текущий язык пользователя из базы на случай, если кнопка fb_ не содержит язык
+        String currentLang = userService.getUserLanguage(chatId).orElse("EN");
 
+        // 1. Убираем "часики" сразу для всех кнопок
+        try {
+            telegramClient.execute(new AnswerCallbackQuery(callbackQuery.getId()));
+        } catch (TelegramApiException e) {
+            e.printStackTrace();
+        }
+
+        // Логика смены языка
         if (data.startsWith("lang_")) {
             String selectedLang = data.split("_")[1];
             userService.setUserLanguage(chatId, selectedLang);
 
-            // 1. Формируем текст подтверждения
             String confirmation = selectedLang.equals("RU")
                     ? "Язык изменен на русский! 🇷🇺"
                     : "Language changed to English! 🇬🇧";
 
-            // 2. Убираем "часики" на кнопке
-            try {
-                telegramClient.execute(new AnswerCallbackQuery(callbackQuery.getId()));
-            } catch (TelegramApiException e) {
-                e.printStackTrace();
-            }
-
-            // 3. САМЫЙ ВАЖНЫЙ МОМЕНТ:
-            // Вместо простого sendText, мы отправляем сообщение С ОБНОВЛЕННЫМ МЕНЮ
             String welcomeText = selectedLang.equals("RU")
                     ? confirmation + "\nЧем я могу вам помочь?"
                     : confirmation + "\nHow can I help you?";
 
-            // Вызываем метод, который соберет кнопки на правильном языке и отправит их
             sendMainMenuWithCustomText(chatId, welcomeText);
+        }
+
+        // Логика выбора анонимности фидбека
+        if (data.startsWith("fb_")) {
+            boolean anon = data.equals("fb_anon");
+            // Задаем точечное состояние!
+            userService.setUserState(chatId, anon ? "WAITING_FB_ANON" : "WAITING_FB_PUBLIC");
+
+            String promptMsg = currentLang.equals("RU")
+                    ? "Принято! Теперь напишите ваш отзыв одним сообщением (или нажмите Отмена):"
+                    : "Got it! Now please write your feedback in one message (or press Cancel):";
+
+            sendOnlyCancelButton(chatId, promptMsg, currentLang);
         }
     }
 
@@ -108,14 +136,16 @@ public class ResumeTelegramBot implements SpringLongPollingBot, LongPollingSingl
         // Формируем кнопки (уже на новом языке, так как мы только что сохранили его в БД)
         String aiBtn = lang.equals("RU") ? "🤖 Спросить AI" : "🤖 Ask AI";
         String langBtn = lang.equals("RU") ? "🌐 Сменить язык" : "🌐 Change Language";
-        String stackBtn = lang.equals("RU") ? "💻 Стек и Опыт" : "💻 Stack & Exp";
         String contactBtn = lang.equals("RU") ? "📞 Контакты" : "📞 Contacts";
         String pdfBtn = lang.equals("RU") ? "📄 Скачать PDF" : "📄 Download PDF";
+        String aiAnalysisBtn = lang.equals("RU") ? "✨ Анализ вакансии" : "✨ Job Analysis";
+        String feedbackBtn = lang.equals("RU") ? "✍️ Оставить отзыв" : "✍️ Leave Feedback";
 
         ReplyKeyboardMarkup keyboardMarkup = ReplyKeyboardMarkup.builder()
-                .keyboardRow(new KeyboardRow(List.of(new KeyboardButton(aiBtn))))
-                .keyboardRow(new KeyboardRow(List.of(new KeyboardButton(stackBtn), new KeyboardButton(contactBtn))))
-                .keyboardRow(new KeyboardRow(List.of(new KeyboardButton(langBtn), new KeyboardButton(pdfBtn))))
+                .keyboardRow(new KeyboardRow(List.of(new KeyboardButton(aiAnalysisBtn), new KeyboardButton(aiBtn))))
+                .keyboardRow(new KeyboardRow(List.of(new KeyboardButton(pdfBtn), new KeyboardButton(contactBtn))))
+                .keyboardRow(new KeyboardRow(List.of(new KeyboardButton(langBtn))))
+                .keyboardRow(new KeyboardRow(List.of(new KeyboardButton(feedbackBtn))))
                 .resizeKeyboard(true)
                 .build();
 
@@ -130,19 +160,60 @@ public class ResumeTelegramBot implements SpringLongPollingBot, LongPollingSingl
         long chatId = update.getMessage().getChatId();
         String text = update.getMessage().getText();
         String lang = userService.getUserLanguage(chatId).orElse("EN");
+        String state = userService.getUserState(chatId);
 
         if (!userService.exists(chatId)) {
             sendLanguageSelection(chatId);
             return;
         }
 
-        if (text.equals("/language") || text.equals("🌐 Сменить язык") || text.equals("🌐 Change Language")) {
-            sendLanguageSelection(chatId);
+        if (text.contains("Отмена") || text.contains("Cancel")) {
+            userService.setUserState(chatId, "DEFAULT");
+            sendText(chatId, lang.equals("RU") ? "Анализ прерван." : "Analysis cancelled.");
+            sendMainMenu(chatId);
             return;
         }
 
-        if (text.equals("💻 Стек и Опыт") || text.equals("💻 Stack & Exp")) {
-            sendStackInfo(chatId, lang);
+        if (state != null && state.startsWith("WAITING_FB_")) {
+            saveAndProcessFeedback(chatId, update.getMessage(), state, lang);
+            return;
+        }
+
+        if ("WAITING_FOR_SPEC".equals(state)) {
+            analyzeVacancy(chatId, text, lang);
+            return;
+        }
+
+        if (text.equals("✍️ Оставить отзыв") || text.equals("✍️ Leave Feedback")) {
+            InlineKeyboardMarkup inlineMarkup = InlineKeyboardMarkup.builder()
+                    .keyboardRow(new InlineKeyboardRow(
+                            InlineKeyboardButton.builder().text("👤 Открыто").callbackData("fb_public").build(),
+                            InlineKeyboardButton.builder().text("👻 Анонимно").callbackData("fb_anon").build()
+                    ))
+                    .build();
+
+            executeMessage(SendMessage.builder()
+                    .chatId(chatId)
+                    .text(lang.equals("RU") ? "Как отправить ваш отзыв?" : "How would you like to send feedback?")
+                    .replyMarkup(inlineMarkup)
+                    .build());
+            return;
+        }
+
+
+        if (text.equals("✨ Анализ вакансии") || text.equals("✨ Job Analysis")) {
+            userService.setUserState(chatId, "WAITING_FOR_SPEC");
+
+            String msg = lang.equals("RU")
+                    ? "Пришлите текст вакансии или файл (PDF/DOCX). Я проанализирую, насколько мой стек подходит под ваши требования! 👇"
+                    : "Please send the job description text or a file (PDF/DOCX). I will analyze how my stack matches your requirements! 👇";
+
+            sendOnlyCancelButton(chatId, msg, lang);
+            return;
+        }
+
+        if (text.equals("/language") || text.equals("🌐 Сменить язык") || text.equals("🌐 Change Language")) {
+            sendLanguageSelection(chatId);
             return;
         }
 
@@ -171,6 +242,34 @@ public class ResumeTelegramBot implements SpringLongPollingBot, LongPollingSingl
         handleAIQuery(chatId, text);
     }
 
+    private void saveAndProcessFeedback(long chatId, Message message, String state, String lang) {
+        boolean isAnon = state.equals("WAITING_FB_ANON");
+        String text = message.getText();
+
+        // Если НЕ анонимно, пытаемся взять имя
+        String senderInfo = "Аноним";
+        if (!isAnon) {
+            String firstName = message.getFrom().getFirstName();
+            String lastName = message.getFrom().getLastName();
+            String username = message.getFrom().getUserName();
+            senderInfo = (firstName != null ? firstName : "") +
+                    (lastName != null ? " " + lastName : "") +
+                    (username != null ? " (@" + username + ")" : "");
+        }
+
+        Feedback feedback = new Feedback(chatId, senderInfo, text, isAnon);
+        feedbackRepository.save(feedback);
+
+        String adminMsg = String.format("📩 *Новый отзыв (%s):*\n%s",
+                isAnon ? "Анонимно" : "Открыто", text);
+        sendText(myChatId, adminMsg);
+
+        // Завершаем
+        userService.setUserState(chatId, "DEFAULT");
+        sendText(chatId, lang.equals("RU") ? "✨ Спасибо за фидбек!" : "✨ Thanks for your feedback!");
+        sendMainMenu(chatId);
+    }
+
     private void sendLanguageSelection(long chatId) {
         InlineKeyboardMarkup markup = InlineKeyboardMarkup.builder()
                 .keyboardRow(new InlineKeyboardRow(
@@ -188,30 +287,78 @@ public class ResumeTelegramBot implements SpringLongPollingBot, LongPollingSingl
         executeMessage(message);
     }
 
-    private void sendStackInfo(long chatId, String lang) {
-        String info = lang.equals("RU")
-                ? """
-          *Мой Стек:*
-          • Java 11/17/21, Spring Boot 3, JPA
-          • Kafka, RabbitMQ, PostgreSQL
-          • AI: Spring AI, LangChain4j, OpenAI API
-          
-          *Опыт:*
-          • 4 года в Крок (микросервисы, интеграции).
-          • Разработка RAG-систем и AI-ассистентов.
-          """
-                : """
-          *Technical Stack:*
-          • Java 11/17/21, Spring Boot 3, JPA
-          • Kafka, RabbitMQ, PostgreSQL
-          • AI: Spring AI, LangChain4j, OpenAI API
-          
-          *Experience:*
-          • 4 years at CROC (microservices, integrations).
-          • Building RAG systems & AI assistants.
-          """;
+    private void sendOnlyCancelButton(long chatId, String text, String lang) {
+        String cancelText = lang.equals("RU") ? "❌ Отмена" : "❌ Cancel";
 
-        sendText(chatId, info);
+        ReplyKeyboardMarkup keyboard = ReplyKeyboardMarkup.builder()
+                .keyboardRow(new KeyboardRow(List.of(new KeyboardButton(cancelText))))
+                .resizeKeyboard(true)
+                .build();
+
+        executeMessage(SendMessage.builder()
+                .chatId(chatId)
+                .text(text)
+                .replyMarkup(keyboard)
+                .build());
+    }
+
+    private void analyzeVacancy(long chatId, String vacancyText, String lang) {
+        // 1. Сообщаем пользователю, что начали работу (анализ может занять 3-5 секунд)
+        String waitingMsg = lang.equals("RU")
+                ? "🔄 Анализирую вакансию... Пожалуйста, подождите."
+                : "🔄 Analyzing the job description... Please wait.";
+        sendText(chatId, waitingMsg);
+
+        String myResume = loadResumeText();
+
+        // 2. Формируем запрос к AI
+        // Мы берем твоё резюме (оно должно быть загружено в контекст или передано строкой)
+        String systemPrompt = """
+            Ты — профессиональный IT-рекрутер. Твоя задача — проанализировать, насколько Елизавета подходит на вакансию.
+            
+            ВОТ РЕЗЮМЕ ЕЛИЗАВЕТЫ:
+            %s
+            
+            При анализе вакансии:
+            1. Будь объективен. Если в вакансии требуется навык, которого нет в резюме (например, специфический фреймворк), отметь это.
+            2. Выдели "Match" (совпадения по стеку и опыту).
+            3. Выдели "Gaps" (чего не хватает или что нужно уточнить).
+            4. Дай краткий совет рекрутеру: на какие темы стоит поспрашивать Елизавету на интервью.
+            
+            Тон ответов: профессиональный, дружелюбный, лаконичный.
+            Отвечай на языке: %s. Использовать Markdown (жирный шрифт, списки).
+        """.formatted(myResume, lang.equals("RU") ? "Русский" : "English");
+
+        try {
+            String aiResponse = chatClient.prompt()
+                    .system(systemPrompt)
+                    .user("Вот текст вакансии для анализа: " + vacancyText)
+                    .call()
+                    .content();
+
+            executeMessage(SendMessage.builder()
+                    .chatId(chatId)
+                    .text(aiResponse)
+                    .parseMode("Markdown")
+                    .build());
+
+            userService.setUserState(chatId, "DEFAULT");
+            sendMainMenu(chatId);
+
+        } catch (Exception e) {
+            sendText(chatId, "Error analyzing vacancy. Please try again later.");
+            userService.setUserState(chatId, "DEFAULT");
+            sendMainMenu(chatId);
+        }
+    }
+
+    private String loadResumeText() {
+        try {
+            InputStream is = getClass().getClassLoader().getResourceAsStream("resume_ru.md");
+            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            return "Данные резюме временно недоступны.";
+        }
     }
 
     private void sendAiHint(long chatId, String lang) {
@@ -251,7 +398,7 @@ public class ResumeTelegramBot implements SpringLongPollingBot, LongPollingSingl
 
     private void sendMainMenu(long chatId) {
         String lang = userService.getUserLanguage(chatId).orElse("EN");
-        String welcome = lang.equals("RU") ? "Выберите раздел меню:" : "Please select a menu item:";
+        String welcome = lang.equals("RU") ? "Выберите раздел меню или просто задайте вопрос:" : "Please select a menu item or just ask a question:";
         sendMainMenuWithCustomText(chatId, welcome);
     }
 

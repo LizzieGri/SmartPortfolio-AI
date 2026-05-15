@@ -22,8 +22,11 @@ public class ContactsCommandHandler implements CommandHandler {
     @Value("${bot.contacts.telegram}")
     private String telegramUrl;
 
-    @Value("${bot.contacts.email}")
-    private String emailAddress;
+    @Value("${bot.contacts.email_ru}")
+    private String emailAddressRu;
+
+    @Value("${bot.contacts.email_en}")
+    private String emailAddressEn;
 
     // Внедряем UserService через конструктор
     public ContactsCommandHandler(UserService userService) {
@@ -40,18 +43,17 @@ public class ContactsCommandHandler implements CommandHandler {
         Long chatId = message.getChatId();
         String lang = userService.getUserLanguage(chatId).orElse("EN");
 
-        // 1. Определяем текст в зависимости от языка
         String text = lang.equals("RU")
                 ? "🤝 <b>Давайте оставаться на связи!</b>\n\n" +
                 "💻 <b>Вы можете изучить мой код на GitHub или написать мне напрямую.</b>\n" +
                 "💬 <b>Я всегда открыта для интересных предложений и обсуждения Java/AI технологий.</b>\n\n" +
                 "📧 <b>Email (нажмите для копирования):</b>\n" +
-                "<code>" + emailAddress + "</code>"
+                "<code>" + emailAddressRu + "</code>"
                 : "🤝 <b>Let's stay in touch!</b>\n\n" +
                 "💻 <b>You can check out my code on GitHub or contact me directly.</b>\n" +
                 "💬 <b>I'm always open to interesting offers and discussions about Java/AI technologies.</b>\n\n" +
                 "📧 <b>Email (click to copy):</b>\n" +
-                "<code>" + emailAddress + "</code>";
+                "<code>" + emailAddressEn + "</code>";
 
         // 2. Определяем названия кнопок
         String githubBtnText = lang.equals("RU") ? "Открыть GitHub" : "Open GitHub";

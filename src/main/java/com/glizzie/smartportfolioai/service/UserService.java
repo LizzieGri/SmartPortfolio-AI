@@ -10,6 +10,19 @@ public class UserService {
 
     private final UserRepository userRepository;
 
+    public String getUserState(Long chatId) {
+        return userRepository.findById(chatId)
+                .map(BotUsers::getState)
+                .orElse("DEFAULT");
+    }
+
+    public void setUserState(Long chatId, String state) {
+        userRepository.findById(chatId).ifPresent(user -> {
+            user.setState(state);
+            userRepository.save(user);
+        });
+    }
+
     public UserService(UserRepository userRepository) {
         this.userRepository = userRepository;
     }
