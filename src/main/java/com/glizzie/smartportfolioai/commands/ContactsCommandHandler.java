@@ -15,6 +15,7 @@ import org.telegram.telegrambots.meta.generics.TelegramClient;
 public class ContactsCommandHandler implements CommandHandler {
 
     private final UserService userService;
+    private final LocalizationManager localizationManager;
 
     @Value("${bot.contacts.github}")
     private String githubUrl;
@@ -28,9 +29,12 @@ public class ContactsCommandHandler implements CommandHandler {
     @Value("${bot.contacts.email_en}")
     private String emailAddressEn;
 
-    // Внедряем UserService через конструктор
-    public ContactsCommandHandler(UserService userService) {
+    @Value("${bot.contacts.email_de}")
+    private String emailAddressDe;
+
+    public ContactsCommandHandler(UserService userService, LocalizationManager localizationManager) {
         this.userService = userService;
+        this.localizationManager = localizationManager;
     }
 
     @Override
@@ -41,31 +45,28 @@ public class ContactsCommandHandler implements CommandHandler {
     @Override
     public void handle(Message message, TelegramClient telegramClient) {
         Long chatId = message.getChatId();
-        String lang = userService.getUserLanguage(chatId).orElse("EN");
 
-        String text = lang.equals("RU")
-                ? "🤝 <b>Давайте оставаться на связи!</b>\n\n" +
-                "💻 <b>Вы можете изучить мой код на GitHub или написать мне напрямую.</b>\n" +
-                "💬 <b>Я всегда открыта для интересных предложений и обсуждения Java/AI технологий.</b>\n\n" +
-                "📧 <b>Email (нажмите для копирования):</b>\n" +
-                "<code>" + emailAddressRu + "</code>"
-                : "🤝 <b>Let's stay in touch!</b>\n\n" +
-                "💻 <b>You can check out my code on GitHub or contact me directly.</b>\n" +
-                "💬 <b>I'm always open to interesting offers and discussions about Java/AI technologies.</b>\n\n" +
-                "📧 <b>Email (click to copy):</b>\n" +
-                "<code>" + emailAddressEn + "</code>";
+        String langCode = userService.getUserLanguage(chatId).orElse("EN");
+        LocalizationService lang = localizationManager.get(langCode);
 
-        // 2. Определяем названия кнопок
-        String githubBtnText = lang.equals("RU") ? "Открыть GitHub" : "Open GitHub";
-        String telegramBtnText = lang.equals("RU") ? "Написать в ЛС" : "Send a Message";
+        String targetEmail;
+        if (lang.getLanguageCode().equals("RU")) {
+            targetEmail = emailAddressRu;
+        } else if (lang.getLanguageCode().equals("DE")) {
+            targetEmail = emailAddressDe;
+        } else {
+            targetEmail = emailAddressEn;
+        }
+
+        String text = lang.getContactsMessage(targetEmail);
 
         InlineKeyboardButton githubBtn = InlineKeyboardButton.builder()
-                .text(githubBtnText)
+                .text(lang.getGithubBtnText())
                 .url(githubUrl)
                 .build();
 
         InlineKeyboardButton telegramBtn = InlineKeyboardButton.builder()
-                .text(telegramBtnText)
+                .text(lang.getTelegramBtnText())
                 .url(telegramUrl)
                 .build();
 
